@@ -19,6 +19,10 @@ const groq = new Groq({
   apiKey: process.env.GROQ_API_KEY,
 });
 
+function sendSse(res: Response, data: Record<string, unknown>) {
+  res.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+
 app.post("/api/chat", async (req: Request, res: Response) => {
   try {
     const { message } = req.body;
@@ -47,9 +51,10 @@ app.post("/api/chat", async (req: Request, res: Response) => {
       stream: true,
     });
 
-    res.setHeader("Content-Type", "text/plain; charset=utf-8");
-    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
 
     if (typeof res.flushHeaders === "function") {
       res.flushHeaders();
@@ -58,10 +63,11 @@ app.post("/api/chat", async (req: Request, res: Response) => {
     for await (const chunk of stream) {
       const text = chunk.choices[0]?.delta?.content ?? "";
       if (text) {
-        res.write(text);
+        sendSse(res, { type: "token", content: text });
       }
     }
 
+    sendSse(res, { type: "done" });
     res.end();
   } catch (error) {
     console.error("Groq API Error:", error);
@@ -72,6 +78,10 @@ app.post("/api/chat", async (req: Request, res: Response) => {
       });
     }
 
+    sendSse(res, {
+      type: "error",
+      message: "Something went wrong while generating the AI response.",
+    });
     res.end();
   }
 });
