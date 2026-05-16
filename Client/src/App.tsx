@@ -100,6 +100,92 @@ function TrashIcon() {
   );
 }
 
+function CopyIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <rect
+        x="9"
+        y="9"
+        width="13"
+        height="13"
+        rx="2"
+        stroke="currentColor"
+        strokeWidth="2"
+      />
+      <path
+        d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"
+        stroke="currentColor"
+        strokeWidth="2"
+      />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path
+        d="M5 12l4 4L19 6"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+async function copyText(text: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  document.body.removeChild(textarea);
+}
+
+function CopyMessageButton({
+  content,
+  messageId,
+  copiedId,
+  onCopied,
+}: {
+  content: string;
+  messageId: string;
+  copiedId: string | null;
+  onCopied: (id: string) => void;
+}) {
+  const copied = copiedId === messageId;
+
+  const handleCopy = async () => {
+    try {
+      await copyText(content);
+      onCopied(messageId);
+    } catch {
+      // Clipboard access denied or unavailable
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      className={`copy-btn${copied ? " copied" : ""}`}
+      onClick={handleCopy}
+      aria-label={copied ? "Copied to clipboard" : "Copy message"}
+    >
+      {copied ? <CheckIcon /> : <CopyIcon />}
+      <span>{copied ? "Copied" : "Copy"}</span>
+    </button>
+  );
+}
+
 function TypingIndicator() {
   return (
     <div className="typing-indicator" aria-label="Assistant is typing">
@@ -130,6 +216,7 @@ function App() {
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [copiedId, setCopiedId] = useState<string | null>(null);
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -147,6 +234,12 @@ function App() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
+
+  useEffect(() => {
+    if (!copiedId) return;
+    const timeoutId = window.setTimeout(() => setCopiedId(null), 2000);
+    return () => window.clearTimeout(timeoutId);
+  }, [copiedId]);
 
   const sendMessage = async (prompt: string) => {
     const trimmed = prompt.trim();
@@ -353,11 +446,25 @@ function App() {
                 {message.role === "user" ? "You" : "AI"}
               </div>
               <div className="message-body">
-                <div className="message-meta">
-                  <strong>{message.role === "user" ? "You" : "Assistant"}</strong>
-                  <time className="message-time" dateTime={message.createdAt}>
-                    {formatTime(message.createdAt)}
-                  </time>
+                <div
+                  className={`message-meta${message.role === "assistant" ? " message-meta--assistant" : ""}`}
+                >
+                  <div className="message-meta-start">
+                    <strong>{message.role === "user" ? "You" : "Assistant"}</strong>
+                    <time className="message-time" dateTime={message.createdAt}>
+                      {formatTime(message.createdAt)}
+                    </time>
+                  </div>
+                  {message.role === "assistant" &&
+                    message.content &&
+                    !message.isStreaming && (
+                      <CopyMessageButton
+                        content={message.content}
+                        messageId={message.id}
+                        copiedId={copiedId}
+                        onCopied={setCopiedId}
+                      />
+                    )}
                 </div>
                 <div className="message-bubble">
                   {message.role === "user" ? (
