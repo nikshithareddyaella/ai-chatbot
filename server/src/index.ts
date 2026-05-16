@@ -29,7 +29,7 @@ app.post("/api/chat", async (req: Request, res: Response) => {
       });
     }
 
-    const completion = await groq.chat.completions.create({
+    const stream = await groq.chat.completions.create({
       model: "llama-3.1-8b-instant",
       messages: [
         {
@@ -39,23 +39,40 @@ app.post("/api/chat", async (req: Request, res: Response) => {
         },
         {
           role: "user",
-          content: message,
+          content: message.trim(),
         },
       ],
       temperature: 0.7,
       max_completion_tokens: 500,
+      stream: true,
     });
 
-    const reply =
-      completion.choices[0]?.message?.content || "No response generated.";
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
 
-    return res.json({ reply });
+    if (typeof res.flushHeaders === "function") {
+      res.flushHeaders();
+    }
+
+    for await (const chunk of stream) {
+      const text = chunk.choices[0]?.delta?.content ?? "";
+      if (text) {
+        res.write(text);
+      }
+    }
+
+    res.end();
   } catch (error) {
     console.error("Groq API Error:", error);
 
-    return res.status(500).json({
-      error: "Something went wrong while generating the AI response.",
-    });
+    if (!res.headersSent) {
+      return res.status(500).json({
+        error: "Something went wrong while generating the AI response.",
+      });
+    }
+
+    res.end();
   }
 });
 
