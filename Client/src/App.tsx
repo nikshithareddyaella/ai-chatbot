@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import "./App.css";
+import { copyText } from "./clipboard";
+import { markdownComponents } from "./markdownComponents";
 import { readSseStream } from "./sse";
 import type { ChatMessage } from "./types";
 
@@ -135,22 +137,6 @@ function CheckIcon() {
   );
 }
 
-async function copyText(text: string) {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
-  }
-
-  const textarea = document.createElement("textarea");
-  textarea.value = text;
-  textarea.style.position = "fixed";
-  textarea.style.opacity = "0";
-  document.body.appendChild(textarea);
-  textarea.select();
-  document.execCommand("copy");
-  document.body.removeChild(textarea);
-}
-
 function CopyMessageButton({
   content,
   messageId,
@@ -205,7 +191,11 @@ function AssistantContent({ message }: { message: ChatMessage }) {
     return <p className="streaming-text">{message.content}</p>;
   }
 
-  return <ReactMarkdown>{message.content}</ReactMarkdown>;
+  return (
+    <ReactMarkdown components={markdownComponents}>
+      {message.content}
+    </ReactMarkdown>
+  );
 }
 
 function App() {
