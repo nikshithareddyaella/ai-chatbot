@@ -19,6 +19,10 @@ const groq = new Groq({
   apiKey: process.env.GROQ_API_KEY,
 });
 
+function sendSse(res: Response, data: Record<string, unknown>) {
+  res.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+
 app.post("/api/chat", async (req: Request, res: Response) => {
   try {
     const { message } = req.body;
@@ -29,7 +33,7 @@ app.post("/api/chat", async (req: Request, res: Response) => {
       });
     }
 
-    const completion = await groq.chat.completions.create({
+    const stream = await groq.chat.completions.create({
       model: "llama-3.1-8b-instant",
       messages: [
         {
@@ -39,23 +43,46 @@ app.post("/api/chat", async (req: Request, res: Response) => {
         },
         {
           role: "user",
-          content: message,
+          content: message.trim(),
         },
       ],
       temperature: 0.7,
       max_completion_tokens: 500,
+      stream: true,
     });
 
-    const reply =
-      completion.choices[0]?.message?.content || "No response generated.";
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
 
-    return res.json({ reply });
+    if (typeof res.flushHeaders === "function") {
+      res.flushHeaders();
+    }
+
+    for await (const chunk of stream) {
+      const text = chunk.choices[0]?.delta?.content ?? "";
+      if (text) {
+        sendSse(res, { type: "token", content: text });
+      }
+    }
+
+    sendSse(res, { type: "done" });
+    res.end();
   } catch (error) {
     console.error("Groq API Error:", error);
 
-    return res.status(500).json({
-      error: "Something went wrong while generating the AI response.",
+    if (!res.headersSent) {
+      return res.status(500).json({
+        error: "Something went wrong while generating the AI response.",
+      });
+    }
+
+    sendSse(res, {
+      type: "error",
+      message: "Something went wrong while generating the AI response.",
     });
+    res.end();
   }
 });
 

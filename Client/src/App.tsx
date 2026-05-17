@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import "./App.css";
+import { copyText } from "./clipboard";
+import { markdownComponents } from "./markdownComponents";
+import { readSseStream } from "./sse";
 import type { ChatMessage } from "./types";
 
 const API_URL = "http://localhost:5000/api/chat";
@@ -99,6 +102,102 @@ function TrashIcon() {
   );
 }
 
+function CopyIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <rect
+        x="9"
+        y="9"
+        width="13"
+        height="13"
+        rx="2"
+        stroke="currentColor"
+        strokeWidth="2"
+      />
+      <path
+        d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"
+        stroke="currentColor"
+        strokeWidth="2"
+      />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path
+        d="M5 12l4 4L19 6"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function CopyMessageButton({
+  content,
+  messageId,
+  copiedId,
+  onCopied,
+}: {
+  content: string;
+  messageId: string;
+  copiedId: string | null;
+  onCopied: (id: string) => void;
+}) {
+  const copied = copiedId === messageId;
+
+  const handleCopy = async () => {
+    try {
+      await copyText(content);
+      onCopied(messageId);
+    } catch {
+      // Clipboard access denied or unavailable
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      className={`copy-btn${copied ? " copied" : ""}`}
+      onClick={handleCopy}
+      aria-label={copied ? "Copied to clipboard" : "Copy message"}
+    >
+      {copied ? <CheckIcon /> : <CopyIcon />}
+      <span>{copied ? "Copied" : "Copy"}</span>
+    </button>
+  );
+}
+
+function TypingIndicator() {
+  return (
+    <div className="typing-indicator" aria-label="Assistant is typing">
+      <span />
+      <span />
+      <span />
+    </div>
+  );
+}
+
+function AssistantContent({ message }: { message: ChatMessage }) {
+  if (message.isStreaming && !message.content) {
+    return <TypingIndicator />;
+  }
+
+  if (message.isStreaming) {
+    return <p className="streaming-text">{message.content}</p>;
+  }
+
+  return (
+    <ReactMarkdown components={markdownComponents}>
+      {message.content}
+    </ReactMarkdown>
+  );
+}
+
 function App() {
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>(() => {
@@ -107,6 +206,7 @@ function App() {
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [copiedId, setCopiedId] = useState<string | null>(null);
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -117,12 +217,19 @@ function App() {
   }, [theme]);
 
   useEffect(() => {
-    localStorage.setItem("chatHistory", JSON.stringify(messages));
+    const storable = messages.map(({ isStreaming: _, ...message }) => message);
+    localStorage.setItem("chatHistory", JSON.stringify(storable));
   }, [messages]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
+
+  useEffect(() => {
+    if (!copiedId) return;
+    const timeoutId = window.setTimeout(() => setCopiedId(null), 2000);
+    return () => window.clearTimeout(timeoutId);
+  }, [copiedId]);
 
   const sendMessage = async (prompt: string) => {
     const trimmed = prompt.trim();
@@ -137,7 +244,16 @@ function App() {
       createdAt: new Date().toISOString(),
     };
 
-    setMessages((prev) => [...prev, userMessage]);
+    const assistantId = crypto.randomUUID();
+    const assistantMessage: ChatMessage = {
+      id: assistantId,
+      role: "assistant",
+      content: "",
+      createdAt: new Date().toISOString(),
+      isStreaming: true,
+    };
+
+    setMessages((prev) => [...prev, userMessage, assistantMessage]);
     setInput("");
     setLoading(true);
 
@@ -153,23 +269,66 @@ function App() {
       });
 
       window.clearTimeout(timeoutId);
-      const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.error || "Failed to fetch response.");
+        const contentType = response.headers.get("content-type") ?? "";
+        let errorMessage = "Failed to fetch response.";
+
+        if (contentType.includes("application/json")) {
+          const data = await response.json();
+          errorMessage = data.error || errorMessage;
+        }
+
+        throw new Error(errorMessage);
       }
 
-      const assistantMessage: ChatMessage = {
-        id: crypto.randomUUID(),
-        role: "assistant",
-        content: data.reply,
-        createdAt: new Date().toISOString(),
-      };
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error("Streaming is not supported in this browser.");
+      }
 
-      setMessages((prev) => [...prev, assistantMessage]);
+      let fullText = "";
+      let streamError: Error | null = null;
+
+      await readSseStream(reader, (event) => {
+        if (event.type === "token") {
+          fullText += event.content;
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId ? { ...m, content: fullText } : m
+            )
+          );
+        } else if (event.type === "error") {
+          streamError = new Error(event.message);
+        }
+      });
+
+      if (streamError) throw streamError;
+
+      const finalContent = fullText.trim() || "No response generated.";
+
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantId
+            ? { ...m, content: finalContent, isStreaming: false }
+            : m
+        )
+      );
     } catch (err) {
+      setMessages((prev) => {
+        const assistant = prev.find((m) => m.id === assistantId);
+        if (!assistant?.content) {
+          return prev.filter((m) => m.id !== assistantId);
+        }
+        return prev.map((m) =>
+          m.id === assistantId ? { ...m, isStreaming: false } : m
+        );
+      });
+
       if (err instanceof Error && err.name === "AbortError") {
         setError("Request timed out. Please try again.");
+      } else if (err instanceof Error) {
+        setError(err.message || "Unable to get AI response. Please try again.");
       } else {
         setError("Unable to get AI response. Please try again.");
       }
@@ -206,6 +365,8 @@ function App() {
     setTheme((prev) => (prev === "light" ? "dark" : "light"));
   };
 
+  const isStreaming = messages.some((m) => m.isStreaming);
+
   return (
     <main className="app">
       <section className="chat-shell" aria-label="Chat interface">
@@ -233,7 +394,7 @@ function App() {
               type="button"
               className="clear-btn"
               onClick={clearChat}
-              disabled={messages.length === 0 && !loading}
+              disabled={messages.length === 0 || loading}
             >
               <TrashIcon />
               <span>Clear chat</span>
@@ -269,47 +430,42 @@ function App() {
             <article
               key={message.id}
               className={`message-row ${message.role}`}
+              aria-busy={message.isStreaming || undefined}
             >
               <div className="message-avatar" aria-hidden>
                 {message.role === "user" ? "You" : "AI"}
               </div>
               <div className="message-body">
-                <div className="message-meta">
-                  <strong>{message.role === "user" ? "You" : "Assistant"}</strong>
-                  <time className="message-time" dateTime={message.createdAt}>
-                    {formatTime(message.createdAt)}
-                  </time>
+                <div
+                  className={`message-meta${message.role === "assistant" ? " message-meta--assistant" : ""}`}
+                >
+                  <div className="message-meta-start">
+                    <strong>{message.role === "user" ? "You" : "Assistant"}</strong>
+                    <time className="message-time" dateTime={message.createdAt}>
+                      {formatTime(message.createdAt)}
+                    </time>
+                  </div>
+                  {message.role === "assistant" &&
+                    message.content &&
+                    !message.isStreaming && (
+                      <CopyMessageButton
+                        content={message.content}
+                        messageId={message.id}
+                        copiedId={copiedId}
+                        onCopied={setCopiedId}
+                      />
+                    )}
                 </div>
                 <div className="message-bubble">
                   {message.role === "user" ? (
                     <p>{message.content}</p>
                   ) : (
-                    <ReactMarkdown>{message.content}</ReactMarkdown>
+                    <AssistantContent message={message} />
                   )}
                 </div>
               </div>
             </article>
           ))}
-
-          {loading && (
-            <article className="message-row assistant" aria-busy="true">
-              <div className="message-avatar" aria-hidden>
-                AI
-              </div>
-              <div className="message-body">
-                <div className="message-meta">
-                  <strong>Assistant</strong>
-                </div>
-                <div className="message-bubble">
-                  <div className="typing-indicator" aria-label="Assistant is typing">
-                    <span />
-                    <span />
-                    <span />
-                  </div>
-                </div>
-              </div>
-            </article>
-          )}
 
           <div ref={messagesEndRef} />
         </section>
@@ -349,6 +505,7 @@ function App() {
           </div>
           <p className="composer-hint">
             Press <kbd>Enter</kbd> to send · <kbd>Shift</kbd>+<kbd>Enter</kbd> for a new line
+            {isStreaming && " · Response streaming"}
           </p>
         </form>
       </section>
