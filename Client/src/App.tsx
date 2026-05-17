@@ -1,10 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import "./App.css";
+import {
+  createChatSession,
+  deriveChatTitle,
+  formatChatDate,
+  loadChatStore,
+  saveChatStore,
+} from "./chatStorage";
 import { copyText } from "./clipboard";
 import { markdownComponents } from "./markdownComponents";
 import { readSseStream } from "./sse";
-import type { ChatMessage } from "./types";
+import type { ChatMessage, ChatSession, ChatStore } from "./types";
 
 const API_URL = "http://localhost:5000/api/chat";
 
@@ -99,6 +106,38 @@ function TrashIcon() {
         strokeLinejoin="round"
       />
     </svg>
+  );
+}
+
+function PlusIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path
+        d="M12 5v14M5 12h14"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function MenuIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path
+        d="M4 7h16M4 12h16M4 17h16"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function sortChatsByUpdated(chats: ChatSession[]) {
+  return [...chats].sort(
+    (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
   );
 }
 
@@ -199,17 +238,55 @@ function AssistantContent({ message }: { message: ChatMessage }) {
 }
 
 function App() {
+  const [store, setStore] = useState<ChatStore>(loadChatStore);
   const [input, setInput] = useState("");
-  const [messages, setMessages] = useState<ChatMessage[]>(() => {
-    const saved = localStorage.getItem("chatHistory");
-    return saved ? JSON.parse(saved) : [];
-  });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  const { activeChatId, chats } = store;
+  const activeChat =
+    chats.find((chat) => chat.id === activeChatId) ?? chats[0] ?? null;
+  const messages = activeChat?.messages ?? [];
+
+  const updateActiveChat = (
+    updater: ChatMessage[] | ((prev: ChatMessage[]) => ChatMessage[]),
+    options?: { title?: string }
+  ) => {
+    setStore((prev) => {
+      const current = prev.chats.find((chat) => chat.id === prev.activeChatId);
+      if (!current) return prev;
+
+      const nextMessages =
+        typeof updater === "function" ? updater(current.messages) : updater;
+
+      const nextTitle =
+        options?.title ??
+        (current.title === "New chat"
+          ? deriveChatTitle(nextMessages)
+          : current.title);
+
+      const updatedChat: ChatSession = {
+        ...current,
+        title: nextTitle,
+        messages: nextMessages,
+        updatedAt: new Date().toISOString(),
+      };
+
+      const nextChats = prev.chats.map((chat) =>
+        chat.id === prev.activeChatId ? updatedChat : chat
+      );
+
+      return {
+        ...prev,
+        chats: sortChatsByUpdated(nextChats),
+      };
+    });
+  };
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
@@ -217,13 +294,12 @@ function App() {
   }, [theme]);
 
   useEffect(() => {
-    const storable = messages.map(({ isStreaming: _, ...message }) => message);
-    localStorage.setItem("chatHistory", JSON.stringify(storable));
-  }, [messages]);
+    saveChatStore(store);
+  }, [store]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, loading]);
+  }, [messages, loading, activeChatId]);
 
   useEffect(() => {
     if (!copiedId) return;
@@ -253,7 +329,7 @@ function App() {
       isStreaming: true,
     };
 
-    setMessages((prev) => [...prev, userMessage, assistantMessage]);
+    updateActiveChat((prev) => [...prev, userMessage, assistantMessage]);
     setInput("");
     setLoading(true);
 
@@ -293,7 +369,7 @@ function App() {
       await readSseStream(reader, (event) => {
         if (event.type === "token") {
           fullText += event.content;
-          setMessages((prev) =>
+          updateActiveChat((prev) =>
             prev.map((m) =>
               m.id === assistantId ? { ...m, content: fullText } : m
             )
@@ -307,7 +383,7 @@ function App() {
 
       const finalContent = fullText.trim() || "No response generated.";
 
-      setMessages((prev) =>
+      updateActiveChat((prev) =>
         prev.map((m) =>
           m.id === assistantId
             ? { ...m, content: finalContent, isStreaming: false }
@@ -315,7 +391,7 @@ function App() {
         )
       );
     } catch (err) {
-      setMessages((prev) => {
+      updateActiveChat((prev) => {
         const assistant = prev.find((m) => m.id === assistantId);
         if (!assistant?.content) {
           return prev.filter((m) => m.id !== assistantId);
@@ -355,10 +431,55 @@ function App() {
     }
   };
 
-  const clearChat = () => {
-    setMessages([]);
-    localStorage.removeItem("chatHistory");
+  const newChat = () => {
+    if (loading) return;
     setError("");
+    setInput("");
+    const chat = createChatSession();
+    setStore((prev) => ({
+      activeChatId: chat.id,
+      chats: sortChatsByUpdated([chat, ...prev.chats]),
+    }));
+    setSidebarOpen(false);
+    textareaRef.current?.focus();
+  };
+
+  const selectChat = (chatId: string) => {
+    if (loading || chatId === activeChatId) return;
+    setError("");
+    setStore((prev) => ({ ...prev, activeChatId: chatId }));
+    setSidebarOpen(false);
+  };
+
+  const deleteChat = (chatId: string, event: React.MouseEvent) => {
+    event.stopPropagation();
+    if (loading) return;
+
+    setStore((prev) => {
+      const remaining = prev.chats.filter((chat) => chat.id !== chatId);
+
+      if (remaining.length === 0) {
+        const chat = createChatSession();
+        return { activeChatId: chat.id, chats: [chat] };
+      }
+
+      const nextActiveId =
+        prev.activeChatId === chatId ? remaining[0].id : prev.activeChatId;
+
+      return {
+        activeChatId: nextActiveId,
+        chats: sortChatsByUpdated(remaining),
+      };
+    });
+    setError("");
+  };
+
+  const clearChat = () => {
+    if (loading || messages.length === 0) return;
+    setError("");
+    updateActiveChat([], { title: "New chat" });
+    setInput("");
+    textareaRef.current?.focus();
   };
 
   const toggleTheme = () => {
@@ -369,14 +490,79 @@ function App() {
 
   return (
     <main className="app">
-      <section className="chat-shell" aria-label="Chat interface">
+      <div className="app-layout">
+        {sidebarOpen && (
+          <button
+            type="button"
+            className="sidebar-backdrop"
+            aria-label="Close chat history"
+            onClick={() => setSidebarOpen(false)}
+          />
+        )}
+
+        <aside
+          className={`sidebar${sidebarOpen ? " open" : ""}`}
+          aria-label="Chat history"
+        >
+          <div className="sidebar-header">
+            <h2>Chats</h2>
+            <button
+              type="button"
+              className="new-chat-btn"
+              onClick={newChat}
+              disabled={loading}
+            >
+              <PlusIcon />
+              <span>New chat</span>
+            </button>
+          </div>
+
+          <ul className="chat-list" role="list">
+            {chats.map((chat) => (
+              <li key={chat.id}>
+                <button
+                  type="button"
+                  className={`chat-list-item${chat.id === activeChatId ? " active" : ""}`}
+                  onClick={() => selectChat(chat.id)}
+                  disabled={loading}
+                >
+                  <span className="chat-list-title">{chat.title}</span>
+                  <span className="chat-list-meta">
+                    {formatChatDate(chat.updatedAt)}
+                    {chat.messages.length > 0 &&
+                      ` · ${Math.ceil(chat.messages.length / 2)} msgs`}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="chat-delete-btn"
+                  onClick={(event) => deleteChat(chat.id, event)}
+                  disabled={loading}
+                  aria-label={`Delete ${chat.title}`}
+                >
+                  <TrashIcon />
+                </button>
+              </li>
+            ))}
+          </ul>
+        </aside>
+
+        <section className="chat-shell" aria-label="Chat interface">
         <header className="chat-header">
           <div className="header-brand">
+            <button
+              type="button"
+              className="icon-btn sidebar-toggle"
+              onClick={() => setSidebarOpen((open) => !open)}
+              aria-label="Toggle chat history"
+            >
+              <MenuIcon />
+            </button>
             <div className="brand-icon" aria-hidden>
               <SparkleIcon />
             </div>
             <div className="brand-text">
-              <h1>AI Assistant</h1>
+              <h1>{activeChat?.title ?? "AI Assistant"}</h1>
               <p>Powered by Groq · Llama 3.1</p>
             </div>
           </div>
@@ -384,11 +570,12 @@ function App() {
           <div className="header-actions">
             <button
               type="button"
-              className="icon-btn"
-              onClick={toggleTheme}
-              aria-label={theme === "light" ? "Switch to dark mode" : "Switch to light mode"}
+              className="new-chat-btn new-chat-btn--compact"
+              onClick={newChat}
+              disabled={loading}
             >
-              {theme === "light" ? <MoonIcon /> : <SunIcon />}
+              <PlusIcon />
+              <span>New chat</span>
             </button>
             <button
               type="button"
@@ -398,6 +585,14 @@ function App() {
             >
               <TrashIcon />
               <span>Clear chat</span>
+            </button>
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={toggleTheme}
+              aria-label={theme === "light" ? "Switch to dark mode" : "Switch to light mode"}
+            >
+              {theme === "light" ? <MoonIcon /> : <SunIcon />}
             </button>
           </div>
         </header>
@@ -508,7 +703,8 @@ function App() {
             {isStreaming && " · Response streaming"}
           </p>
         </form>
-      </section>
+        </section>
+      </div>
     </main>
   );
 }
